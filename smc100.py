@@ -45,14 +45,16 @@ class SMC100(object):
 
     <ID><command><result><CR><LF>
 
-  There is minimal support for manually setting stage parameter as Newport's ESP stages can
-  supply the SMC100 with the correct configuration parameters.
+  There is minimal support for manually setting stage parameter as Newport's
+  ESP stages can supply the SMC100 with the correct configuration parameters.
 
-  Some effort is made to take up backlash, but this should not be trusted too much.
+  Some effort is made to take up backlash, but this should not be trusted too
+  much.
 
-  The move commands must be used with care, because they make assumptions about the units which is
-  dependent on the STAGE. I only have TRB25CC, which has native units of mm. A more general
-  implementation will move the move methods into a stage class.
+  The move commands must be used with care, because they make assumptions
+  about the units which is dependent on the STAGE. I only have TRB25CC, which
+  has native units of mm. A more general implementation will move the move
+  methods into a stage class.
   """
 
   _port = None
@@ -64,7 +66,16 @@ class SMC100(object):
     """
     If backlash_compensation is False, no backlash compensation will be done.
 
-    If silent is False, then additional output will be emitted to aid in debugging.
+    If silent is False, then additional output will be emitted to aid in
+    debugging.
+
+    Note that this method only connects to the controller, it otherwise makes
+    no attempt to home or configure the controller for the attached stage. This
+    delibrate to minimise realworld side effects.
+
+    If the controller has previously been configured, it will suffice to simply
+    call home() to take the controller out of not referenced mode. For a brand
+    new controller, call reset_and_configure().
     """
 
     super(SMC100, self).__init__()
@@ -86,6 +97,12 @@ class SMC100(object):
 
     self._smcID = str(smcID)
 
+  def reset_and_configure(self):
+    """
+    Configures the controller by resetting it and then asking it to load
+    stage parameters from an ESP compatible stage. This is then followed
+    by a homing action.
+    """
     self.sendcmd('RS')
     self.sendcmd('RS')
 
@@ -113,14 +130,18 @@ class SMC100(object):
     # wait for us to get back into NOT REFERENCED state
     self.wait_state(STATE_NOT_REFERENCED_FROM_CONFIGURATION)
 
-    # home so we are no longer NOT REFERENCED
-    self.home()
+  def home(self, waitStop=True):
+    """
+    Homes the controller. If waitStop is True, then this method returns when
+    homing is complete.
 
-    # wait for the controller to be ready
-    self.wait_state(STATE_READY_FROM_HOMING)
-
-  def home(self):
+    Calling this method is necessary to take the controller out of not referenced
+    state after a restart.
+    """
     self.sendcmd('OR')
+    if waitStop:
+      # wait for the controller to be ready
+      self.wait_state(STATE_READY_FROM_HOMING)
 
   def stop(self):
     self.sendcmd('ST')
@@ -323,8 +344,16 @@ class SMC100(object):
   def __del__(self):
     self.close()
 # Tests #####################################################################
-def test_init():
+def test_configure():
   smc100 = SMC100(1, '/dev/ttyS0', silent=False)
+  smc100.reset_and_configure()
+  # make sure there are no errors
+  assert smc100.get_status()[0] == 0
+  del smc100
+
+def test_general():
+  smc100 = SMC100(1, '/dev/ttyS0', silent=False)
+  smc100.home()
 
   # make sure there are no errors
   assert smc100.get_status()[0] == 0
