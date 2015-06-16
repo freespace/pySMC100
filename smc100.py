@@ -15,6 +15,8 @@ STATE_NOT_REFERENCED_FROM_CONFIGURATION = '0C'
 STATE_READY_FROM_HOMING = '32'
 STATE_READY_FROM_MOVING = '33'
 
+STATE_CONFIGURATION = '14'
+
 STATE_DISABLE_FROM_READY = '3C'
 STATE_DISABLE_FROM_MOVING = '3D'
 STATE_DISABLE_FROM_JOGGING = '3E'
@@ -47,6 +49,10 @@ class SMC100(object):
   supply the SMC100 with the correct configuration parameters.
 
   Some effort is made to take up backlash, but this should not be trusted too much.
+
+  The move commands must be used with care, because they make assumptions about the units which is
+  dependent on the STAGE. I only have TRB25CC, which has native units of mm. A more general
+  implementation will move the move methods into a stage class.
   """
 
   _port = None
@@ -81,6 +87,9 @@ class SMC100(object):
     self._smcID = str(smcID)
 
     self.sendcmd('RS')
+    self.sendcmd('RS')
+
+    time.sleep(3)
 
     self.wait_state(STATE_NOT_REFERENCED_FROM_RESET, ignore_disabled_states=True)
 
@@ -89,6 +98,8 @@ class SMC100(object):
 
     # enter config mode
     self.sendcmd('PW', 1)
+
+    self.wait_state(STATE_CONFIGURATION)
 
     # load stage parameters
     self.sendcmd('ZX', 1)
@@ -111,6 +122,9 @@ class SMC100(object):
   def home(self):
     self.sendcmd('OR')
 
+  def stop(self):
+    self.sendcmd('ST')
+
   def get_status(self):
     """
     Executes TS? and returns the the error code as integer and state as string
@@ -125,16 +139,53 @@ class SMC100(object):
 
     return errors, state
 
+  def get_position_mm(self):
+    dist_mm = float(self.sendcmd('TP', '?', expect_response=True))
+    return dist_mm
+
+  def get_position_um(self):
+    return int(self.get_position_mm()*1000)
+
+  def move_relative_mm(self, dist_mm, waitStop=True):
+    """
+    Moves the stage relatively to the current position by the given distance given in mm
+
+    If waitStop is True then this method returns when the move is completed.
+    """
+    self.sendcmd('PR', dist_mm)
+    if waitStop:
+      self.wait_state(STATE_READY_FROM_MOVING)
+
+
+  def move_relative_um(self, dist_um, **kwargs):
+    """
+    Moves the stage relatively to the current position by the given distance given in um. The
+    given distance is first converted to an integer.
+
+    If waitStop is True then this method returns when the move is completed.
+    """
+    dist_mm = int(dist_um)/1000
+    self.move_relative_mm(dist_mm, **kwargs)
+
   def move_absolute_mm(self, position_mm, waitStop=True):
     """
-    Move the stage to the given absolute position (mm).
+    Moves the stage to the given absolute position given in mm.
 
-    If wait is True, then this method returns when the stage is at the
-    specified position and motion has stopped.
+    If waitStop is True then this method returns when the move is completed.
     """
     self.sendcmd('PA', position_mm)
     if waitStop:
       self.wait_state(STATE_READY_FROM_MOVING)
+
+  def move_absolute_um(self, position_um, **kwargs):
+    """
+    Moves the stage to the given absolute position given in um. Note that the position specified
+    will be converted an integer.
+
+    If waitStop is True then this method returns when the move is completed.
+    """
+    pos_mm = int(position_um)/1000
+    return self.move_absolute_mm(pos_mm, **kwargs)
 
   def wait_state(self, targetstate, ignore_disabled_states=False):
     """
@@ -154,6 +205,7 @@ class SMC100(object):
     """
     starttime = time.time()
     done = False
+    self._emit('waiting for state %s'%(targetstate))
     while not done:
       waittime = time.time() - starttime
       if waittime > MAX_WAIT_TIME_SEC:
@@ -162,6 +214,7 @@ class SMC100(object):
       try:
         state = self.get_status()[1]
         if targetstate == state:
+          self._emit('in state %s'%(targetstate))
           return
         elif not ignore_disabled_states:
           disabledstates = [
@@ -276,8 +329,18 @@ def test_init():
   # make sure there are no errors
   assert smc100.get_status()[0] == 0
 
-  smc100.move_absolute_mm(10)
-  smc100.move_absolute_mm(0)
+  smc100.move_relative_um(5*1000)
+  smc100.move_relative_mm(5)
+
+  assert smc100.get_status()[0] == 0
+
+  pos = smc100.get_position_mm()
+
+  assert abs(pos-10)<0.001
+
+  smc100.move_relative_mm(-pos)
+
+  assert smc100.get_status()[0] == 0
 
   del smc100
 
