@@ -33,6 +33,15 @@ class SMC100DisabledStateException(Exception):
   def __init__(self):
     super(SMC100DisabledStateException, self).__init__('Disabled state encountered')
 
+class SMC100RS232CorruptionException(Exception):
+  def __init__(self, c):
+    super(SMC100RS232CorruptionException, self).__init__('RS232 corruption detected: %s'%(hex(ord(c))))
+
+class SMC100InvalidResponseException(Exception):
+  def __init__(self, cmd, resp):
+    s = 'Invalid response to %s: %s'%(cmd, resp)
+    super(SMC100InvalidResponseException, self).__init__(s)
+
 class SMC100(object):
   """
   Class to interface with Newport's SMC100 controller.
@@ -93,6 +102,7 @@ class SMC100(object):
         bytesize = 8,
         stopbits = 1,
         parity = 'N',
+        xonxoff = True,
         timeout = 0.050)
 
     self._smcID = str(smcID)
@@ -152,7 +162,7 @@ class SMC100(object):
     as specified on pages 64 - 65 of the manual.
     """
 
-    resp = self.sendcmd('TS', '?', True)
+    resp = self.sendcmd('TS', '?', expect_response=True, retry=True)
     errors = int(resp[0:4], 16)
     state = resp[4:]
 
@@ -161,7 +171,7 @@ class SMC100(object):
     return errors, state
 
   def get_position_mm(self):
-    dist_mm = float(self.sendcmd('TP', '?', expect_response=True))
+    dist_mm = float(self.sendcmd('TP', '?', expect_response=True, retry=True))
     return dist_mm
 
   def get_position_um(self):
@@ -250,16 +260,26 @@ class SMC100(object):
         time.sleep(1)
         continue
 
-  def sendcmd(self, command, argument=None, expect_response=False):
+  def sendcmd(self, command, argument=None, expect_response=False, retry=False):
     """
-    Send the specified command along with the argument, if any. The response is checked to ensure
-    it has the correct prefix, and is returned WITHOUT the prefix.
+    Send the specified command along with the argument, if any. The response
+    is checked to ensure it has the correct prefix, and is returned WITHOUT
+    the prefix.
 
-    It is important that for GET commands, e.g. 1ID?, the ? is specified as an ARGUMENT, not as
-    part of the command. Doing so will result in assertion failure.
+    It is important that for GET commands, e.g. 1ID?, the ? is specified as an
+    ARGUMENT, not as part of the command. Doing so will result in assertion
+    failure.
 
-    If expect_response is True, a response is expected from the controller which will be verified
-    and returned without the prefix.
+    If expect_response is True, a response is expected from the controller
+    which will be verified and returned without the prefix.
+
+    If expect_response is True, and retry is True or an integer, then when the
+    response does not pass verification, the command will be sent again for
+    retry number of times, or until success if retry is True.
+
+    The retry option MUST BE USED CAREFULLY. It should ONLY be used read-only
+    commands, because otherwise REPEATED MOTION MIGHT RESULT. In fact some
+    commands are EXPLICITLY REJECTED to prevent this, such as relative move.
     """
     assert command[-1] != '?'
 
@@ -269,22 +289,41 @@ class SMC100(object):
     prefix = self._smcID + command
     tosend = prefix + str(argument)
 
-    self._port.flushInput()
-    self._port.write(tosend)
-    self._port.write('\r\n')
-    self._port.flush()
+    # prevent certain commands from being retried automatically
+    no_retry_commands = ['PR', 'OR']
+    if command in no_retry_commands:
+      retry = False
 
-    time.sleep(COMMAND_WAIT_TIME_SEC)
+    while True:
+      self._port.flushInput()
+      self._port.flushOutput()
 
-    if not self._silent:
-      self._emit('sent', tosend)
+      self._port.write(tosend)
+      self._port.write('\r\n')
 
-    if expect_response:
-      response = self._readline()
-      assert response.startswith(prefix)
-      return response[len(prefix):]
-    else:
-      return None
+      self._port.flush()
+
+      time.sleep(COMMAND_WAIT_TIME_SEC)
+
+      if not self._silent:
+        self._emit('sent', tosend)
+
+      if expect_response:
+        try:
+          response = self._readline()
+          assert response.startswith(prefix), '%s does not start with %s'%(response, prefix)
+          prefixlen = len(prefix)
+          return response[prefixlen:]
+        except Exception, ex:
+          if not retry or retry <=0:
+            raise ex
+          else:
+            if type(retry) == int:
+              retry -= 1
+            continue
+
+      else:
+        return None
 
   def _readline(self):
     """
@@ -318,11 +357,13 @@ class SMC100(object):
         continue
       elif c == '\n':
         done = True
-      else:
+      elif ord(c) > 32 and ord(c) < 127:
         line += c
+      else:
+        raise SMC100RS232CorruptionException(c)
 
     self._emit('read', line)
-
+    
     return line
 
   def _emit(self, *args):
@@ -345,14 +386,16 @@ class SMC100(object):
     self.close()
 # Tests #####################################################################
 def test_configure():
-  smc100 = SMC100(1, '/dev/ttyS0', silent=False)
+  smc100 = SMC100(1, '/dev/ttyS5', silent=False)
   smc100.reset_and_configure()
   # make sure there are no errors
   assert smc100.get_status()[0] == 0
   del smc100
 
 def test_general():
-  smc100 = SMC100(1, '/dev/ttyS0', silent=False)
+  smc100 = SMC100(1, '/dev/ttyS5', silent=False)
+  print smc100.get_position_mm()
+
   smc100.home()
 
   # make sure there are no errors
