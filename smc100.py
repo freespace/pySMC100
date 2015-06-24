@@ -2,6 +2,8 @@
 import serial
 import time
 
+from math import floor
+
 # never wait for more than this e.g. during wait_states
 MAX_WAIT_TIME_SEC = 12
 
@@ -228,12 +230,12 @@ class SMC100(object):
 
   def move_absolute_um(self, position_um, **kwargs):
     """
-    Moves the stage to the given absolute position given in um. Note that the position specified
-    will be converted an integer.
+    Moves the stage to the given absolute position given in um. Note that the
+    position specified will be floor'd first before conversion to mm.
 
     If waitStop is True then this method returns when the move is completed.
     """
-    pos_mm = int(position_um)/1000
+    pos_mm = floor(position_um)/1000
     return self.move_absolute_mm(pos_mm, **kwargs)
 
   def wait_states(self, targetstates, ignore_disabled_states=False):
@@ -326,7 +328,6 @@ class SMC100(object):
 
       self._port.flush()
 
-      self._sleepfunc(COMMAND_WAIT_TIME_SEC)
 
       if not self._silent:
         self._emit('sent', tosend)
@@ -347,6 +348,8 @@ class SMC100(object):
             continue
 
       else:
+        # we only need to delay when we are not waiting for a response
+        self._sleepfunc(COMMAND_WAIT_TIME_SEC)
         return None
 
   def _readline(self):
