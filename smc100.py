@@ -2,7 +2,7 @@
 import serial
 import time
 
-# never wait for more than this e.g. during wait_state
+# never wait for more than this e.g. during wait_states
 MAX_WAIT_TIME_SEC = 12
 
 # time to wait after sending a command. This number has been arrived at by
@@ -30,8 +30,8 @@ class SMC100WaitTimedOutException(Exception):
     super(SMC100WaitTimedOutException, self).__init__('Wait timed out')
 
 class SMC100DisabledStateException(Exception):
-  def __init__(self):
-    super(SMC100DisabledStateException, self).__init__('Disabled state encountered')
+  def __init__(self, state):
+    super(SMC100DisabledStateException, self).__init__('Disabled state encountered: '+state)
 
 class SMC100RS232CorruptionException(Exception):
   def __init__(self, c):
@@ -71,12 +71,18 @@ class SMC100(object):
 
   _silent = True
 
-  def __init__(self, smcID, port, backlash_compensation=True, silent=True):
+  _sleepfunc = time.sleep
+
+  def __init__(self, smcID, port, backlash_compensation=True, silent=True, sleepfunc=None):
     """
     If backlash_compensation is False, no backlash compensation will be done.
 
     If silent is False, then additional output will be emitted to aid in
     debugging.
+
+    If sleepfunc is not None, then it will be used instead of time.sleep. It
+    will be given the number of seconds (float) to sleep for, and is provided
+    for ease integration with single threaded GUIs.
 
     Note that this method only connects to the controller, it otherwise makes
     no attempt to home or configure the controller for the attached stage. This
@@ -91,6 +97,9 @@ class SMC100(object):
 
     assert smcID is not None
     assert port is not None
+
+    if sleepfunc is not None:
+      self._sleepfunc = sleepfunc
 
     self._silent = silent
 
@@ -116,9 +125,9 @@ class SMC100(object):
     self.sendcmd('RS')
     self.sendcmd('RS')
 
-    time.sleep(3)
+    self._sleepfunc(3)
 
-    self.wait_state(STATE_NOT_REFERENCED_FROM_RESET, ignore_disabled_states=True)
+    self.wait_states(STATE_NOT_REFERENCED_FROM_RESET, ignore_disabled_states=True)
 
     stage = self.sendcmd('ID', '?', True)
     print 'Found stage', stage
@@ -126,7 +135,7 @@ class SMC100(object):
     # enter config mode
     self.sendcmd('PW', 1)
 
-    self.wait_state(STATE_CONFIGURATION)
+    self.wait_states(STATE_CONFIGURATION)
 
     # load stage parameters
     self.sendcmd('ZX', 1)
@@ -138,12 +147,17 @@ class SMC100(object):
     self.sendcmd('PW', 0)
 
     # wait for us to get back into NOT REFERENCED state
-    self.wait_state(STATE_NOT_REFERENCED_FROM_CONFIGURATION)
+    self.wait_states(STATE_NOT_REFERENCED_FROM_CONFIGURATION)
 
   def home(self, waitStop=True):
     """
     Homes the controller. If waitStop is True, then this method returns when
     homing is complete.
+
+    Note that because calling home when the stage is already homed has no
+    effect, and homing is generally expected to place the stage at the
+    origin, an absolute move to 0 um is executed after homing. This ensures
+    that the stage is at origin after calling this method.
 
     Calling this method is necessary to take the controller out of not referenced
     state after a restart.
@@ -151,7 +165,11 @@ class SMC100(object):
     self.sendcmd('OR')
     if waitStop:
       # wait for the controller to be ready
-      self.wait_state(STATE_READY_FROM_HOMING)
+      st = self.wait_states((STATE_READY_FROM_HOMING, STATE_READY_FROM_MOVING))
+      if st == STATE_READY_FROM_MOVING:
+        self.move_absolute_um(0, waitStop=True)
+    else:
+      self.move_absolute_um(0, waitStop=False)
 
   def stop(self):
     self.sendcmd('ST')
@@ -162,7 +180,7 @@ class SMC100(object):
     as specified on pages 64 - 65 of the manual.
     """
 
-    resp = self.sendcmd('TS', '?', expect_response=True, retry=True)
+    resp = self.sendcmd('TS', '?', expect_response=True, retry=10)
     errors = int(resp[0:4], 16)
     state = resp[4:]
 
@@ -171,7 +189,7 @@ class SMC100(object):
     return errors, state
 
   def get_position_mm(self):
-    dist_mm = float(self.sendcmd('TP', '?', expect_response=True, retry=True))
+    dist_mm = float(self.sendcmd('TP', '?', expect_response=True, retry=10))
     return dist_mm
 
   def get_position_um(self):
@@ -185,7 +203,7 @@ class SMC100(object):
     """
     self.sendcmd('PR', dist_mm)
     if waitStop:
-      self.wait_state(STATE_READY_FROM_MOVING)
+      self.wait_states(STATE_READY_FROM_MOVING)
 
 
   def move_relative_um(self, dist_um, **kwargs):
@@ -206,7 +224,7 @@ class SMC100(object):
     """
     self.sendcmd('PA', position_mm)
     if waitStop:
-      self.wait_state(STATE_READY_FROM_MOVING)
+      self.wait_states(STATE_READY_FROM_MOVING)
 
   def move_absolute_um(self, position_um, **kwargs):
     """
@@ -218,25 +236,30 @@ class SMC100(object):
     pos_mm = int(position_um)/1000
     return self.move_absolute_mm(pos_mm, **kwargs)
 
-  def wait_state(self, targetstate, ignore_disabled_states=False):
+  def wait_states(self, targetstates, ignore_disabled_states=False):
     """
-    Waits for the controller to enter the specified target state. Controller state is determined
-    via the TS command.
+    Waits for the controller to enter one of the the specified target state.
+    Controller state is determined via the TS command.
 
-    If ignore_disabled_states is True, disable states are ignored. The normal behaviour when
-    encountering a disabled state when not looking for one is for an exception to be raised.
+    If ignore_disabled_states is True, disable states are ignored. The normal
+    behaviour when encountering a disabled state when not looking for one is
+    for an exception to be raised.
 
-    Note that this method will ignore read timeouts and keep trying until the controller responds.
-    Because of this it can be used to determine when the controller is ready again after a
-    command like PW0 which can take up to 10 seconds to execute.
+    Note that this method will ignore read timeouts and keep trying until the
+    controller responds.  Because of this it can be used to determine when the
+    controller is ready again after a command like PW0 which can take up to 10
+    seconds to execute.
 
-    If any disable state is encountered, the method will raise an error, UNLESS you were waiting
-    for that state. This is because if we wait for READY_FROM_MOVING, and the stage gets stuck
-    we transition into DISABLE_FROM_MOVING and then STAY THERE FOREVER.
+    If any disable state is encountered, the method will raise an error,
+    UNLESS you were waiting for that state. This is because if we wait for
+    READY_FROM_MOVING, and the stage gets stuck we transition into
+    DISABLE_FROM_MOVING and then STAY THERE FOREVER.
+
+    The state encountered is returned.
     """
     starttime = time.time()
     done = False
-    self._emit('waiting for state %s'%(targetstate))
+    self._emit('waiting for states %s'%(str(targetstates)))
     while not done:
       waittime = time.time() - starttime
       if waittime > MAX_WAIT_TIME_SEC:
@@ -244,20 +267,20 @@ class SMC100(object):
 
       try:
         state = self.get_status()[1]
-        if targetstate == state:
-          self._emit('in state %s'%(targetstate))
-          return
+        if state in targetstates:
+          self._emit('in state %s'%(state))
+          return state
         elif not ignore_disabled_states:
           disabledstates = [
               STATE_DISABLE_FROM_READY,
               STATE_DISABLE_FROM_JOGGING,
-              STATE_READY_FROM_MOVING]
+              STATE_DISABLE_FROM_MOVING]
           if state in disabledstates:
-            raise SMC100DisabledStateException()
+            raise SMC100DisabledStateException(state)
 
       except SMC100ReadTimeOutException:
         self._emit('Read timed out, retrying in 1 second')
-        time.sleep(1)
+        self._sleepfunc(1)
         continue
 
   def sendcmd(self, command, argument=None, expect_response=False, retry=False):
@@ -303,7 +326,7 @@ class SMC100(object):
 
       self._port.flush()
 
-      time.sleep(COMMAND_WAIT_TIME_SEC)
+      self._sleepfunc(COMMAND_WAIT_TIME_SEC)
 
       if not self._silent:
         self._emit('sent', tosend)
@@ -311,9 +334,10 @@ class SMC100(object):
       if expect_response:
         try:
           response = self._readline()
-          assert response.startswith(prefix), '%s does not start with %s'%(response, prefix)
-          prefixlen = len(prefix)
-          return response[prefixlen:]
+          if response.startswith(prefix):
+            return response[len(prefix):]
+          else:
+            raise SMC100InvalidResponseException(command, response)
         except Exception, ex:
           if not retry or retry <=0:
             raise ex
@@ -363,7 +387,7 @@ class SMC100(object):
         raise SMC100RS232CorruptionException(c)
 
     self._emit('read', line)
-    
+
     return line
 
   def _emit(self, *args):
