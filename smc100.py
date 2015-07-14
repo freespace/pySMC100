@@ -205,7 +205,11 @@ class SMC100(object):
     """
     self.sendcmd('PR', dist_mm)
     if waitStop:
-      self.wait_states(STATE_READY_FROM_MOVING)
+      # If we were previously homed, then something like PR0 will have no
+      # effect and we end up waiting forever for ready from moving because
+      # we never left ready from homing. This is why STATE_READY_FROM_HOMING
+      # is included.
+      self.wait_states((STATE_READY_FROM_MOVING, STATE_READY_FROM_HOMING))
 
 
   def move_relative_um(self, dist_um, **kwargs):
@@ -226,7 +230,11 @@ class SMC100(object):
     """
     self.sendcmd('PA', position_mm)
     if waitStop:
-      self.wait_states(STATE_READY_FROM_MOVING)
+      # If we were previously homed, then something like PR0 will have no
+      # effect and we end up waiting forever for ready from moving because
+      # we never left ready from homing. This is why STATE_READY_FROM_HOMING
+      # is included.
+      self.wait_states((STATE_READY_FROM_MOVING, STATE_READY_FROM_HOMING))
 
   def move_absolute_um(self, position_um, **kwargs):
     """
