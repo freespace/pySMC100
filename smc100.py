@@ -105,6 +105,8 @@ class SMC100(object):
 
     self._silent = silent
 
+    self._last_sendcmd_time = 0
+
     print 'Connecting to SMC100 on %s'%(port)
 
     self._port = serial.Serial(
@@ -328,14 +330,15 @@ class SMC100(object):
       retry = False
 
     while True:
-      self._port.flushInput()
+      if expect_response:
+        self._port.flushInput()
+
       self._port.flushOutput()
 
       self._port.write(tosend)
       self._port.write('\r\n')
 
       self._port.flush()
-
 
       if not self._silent:
         self._emit('sent', tosend)
@@ -354,10 +357,15 @@ class SMC100(object):
             if type(retry) == int:
               retry -= 1
             continue
-
       else:
         # we only need to delay when we are not waiting for a response
-        self._sleepfunc(COMMAND_WAIT_TIME_SEC)
+        now = time.time()
+        dt = now - self._last_sendcmd_time
+        dt = COMMAND_WAIT_TIME_SEC - dt
+        if dt > 0:
+          self._sleepfunc(dt)
+        
+        self._last_sendcmd_time = now
         return None
 
   def _readline(self):
