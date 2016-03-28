@@ -318,6 +318,9 @@ class SMC100(object):
     """
     assert command[-1] != '?'
 
+    if self._port is None:
+      return
+
     if argument is None:
       argument = ''
 
@@ -329,7 +332,7 @@ class SMC100(object):
     if command in no_retry_commands:
       retry = False
 
-    while True:
+    while self._port is not None:
       if expect_response:
         self._port.flushInput()
 
