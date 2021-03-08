@@ -191,7 +191,7 @@ class SMC100(object):
     assert len(state) == 2
     
     if not silent:
-      print('status of', self.name, '\n  errors:', errors)
+      print('status:')
       if state == '0A':
         print('  state: NOT REFERENCED from reset')
       elif state == '0B':
